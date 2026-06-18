@@ -37,3 +37,11 @@ export const ARBITRAGE = {
   CONCURRENCY: 3,
   CACHE_TTL_MS: 6 * 60 * 60 * 1000, // 6 hours
 };
+
+export const PUPPETEER = {
+  HEADLESS: true,
+  SLOW_MO_MS: 50,
+  VIEWPORT: { width: 1920, height: 1080 },
+  USER_AGENT:
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+};
