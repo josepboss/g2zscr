@@ -1,9 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { G2G, Z2U, ARBITRAGE, PUPPETEER } from './config';
+import { G2G, Z2U, ARBITRAGE } from './config';
 import type {
   Z2UCatalogEntry,
   G2GBrand,
@@ -14,8 +12,6 @@ import type {
   ArbitrageRequest,
   ArbitrageResponse,
 } from './types';
-
-puppeteer.use(StealthPlugin());
 
 const app = express();
 const PORT = 3001;
@@ -53,7 +49,7 @@ const generateSeoTerm = (brandName: string, category: string): string => {
   return `${base}-${suffix}`;
 };
 
-// ─── Bug 5 — Fuzzy matching with abbreviation map & token overlap ───
+// ─── Fuzzy matching with abbreviation map & token overlap ───
 
 const ABBREVS: Record<string, string> = {
   osrs: 'oldschoolrunescape',
@@ -83,172 +79,6 @@ function fuzzyMatch(a: string, b: string): boolean {
   return score >= 0.6;
 }
 
-// ─── Puppeteer browser singleton ──────────────────────────
-
-let _browser: import('puppeteer').Browser | null = null;
-
-async function getBrowser() {
-  if (!_browser) {
-    // Use puppeteer-core with system chrome if available, otherwise bundled
-    const puppeteerFull = await import('puppeteer');
-    _browser = await puppeteerFull.launch({
-      headless: PUPPETEER.HEADLESS,
-      slowMo: PUPPETEER.SLOW_MO_MS,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    });
-  }
-  return _browser;
-}
-
-async function closeBrowser() {
-  if (_browser) {
-    try { await _browser.close(); } catch {}
-    _browser = null;
-  }
-}
-
-// ─── Puppeteer-based Z2U page scraper ─────────────────────
-
-async function scrapeZ2UPageWithPuppeteer(url: string): Promise<string | null> {
-  let browser: import('puppeteer').Browser | null = null;
-  try {
-    const puppeteerFull = await import('puppeteer');
-    browser = await puppeteerFull.launch({
-      headless: PUPPETEER.HEADLESS,
-      slowMo: PUPPETEER.SLOW_MO_MS,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    });
-    const page = await browser.newPage();
-    await page.setViewport(PUPPETEER.VIEWPORT);
-    await page.setUserAgent(PUPPETEER.USER_AGENT);
-
-    // Set extra headers
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    });
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-
-    // Wait for content to render (Cloudflare challenge resolves in browser)
-    await sleep(2000);
-
-    const html = await page.content();
-    return html;
-  } catch (err) {
-    console.error(`Puppeteer failed for ${url}:`, (err as Error).message);
-    return null;
-  } finally {
-    if (browser) {
-      try { await browser.close(); } catch {}
-    }
-  }
-}
-
-// ─── Puppeteer-based Z2U price page scraper ────────────────
-
-async function scrapeZ2UOffersWithPuppeteer(url: string): Promise<Z2UOffer[]> {
-  let browser: import('puppeteer').Browser | null = null;
-  try {
-    const puppeteerFull = await import('puppeteer');
-    browser = await puppeteerFull.launch({
-      headless: PUPPETEER.HEADLESS,
-      slowMo: PUPPETEER.SLOW_MO_MS,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    });
-    const page = await browser.newPage();
-    await page.setViewport(PUPPETEER.VIEWPORT);
-    await page.setUserAgent(PUPPETEER.USER_AGENT);
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(3000);
-
-    // Look for base64-encoded data in script tags or page content
-    const offers: Z2UOffer[] = await page.evaluate(() => {
-      // Try to find JSON data in script tags with base64 encoding
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent || '';
-        // Look for base64 patterns that decode to JSON with offer data
-        const base64Match = text.match(/"([A-Za-z0-9+/=]{100,})"/);
-        if (base64Match) {
-          try {
-            const decoded = JSON.parse(atob(base64Match[1]));
-            if (decoded?.data && Array.isArray(decoded.data)) {
-              return decoded.data.map((item: any) => ({
-                offer_id: item.offer_id,
-                game_id: item.game_id,
-                category_id: item.category_id,
-                title: item.title,
-                unit_price: item.unit_price,
-                origin_sort_price: item.origin_sort_price,
-                sell_user_id: item.sell_user_id,
-                is_auto_deliver: item.is_auto_deliver,
-                remain_stock_num: item.remain_stock_num,
-                off_url: item.off_url,
-                currency: item.currency,
-                current_currency: item.current_currency,
-                insurance: item.insurance,
-                shop_name: item.shop_name,
-              }));
-            }
-          } catch {}
-        }
-      }
-
-      // Fallback: try to find table rows with offer data
-      const rows = document.querySelectorAll('[class*="offer"], [class*="product"], tr.offer-row, tr.product-row');
-      if (rows.length > 0) {
-        return Array.from(rows).map((row) => {
-          const cells = row.querySelectorAll('td');
-          return {
-            offer_id: parseInt(cells[0]?.textContent || '0'),
-            game_id: 0,
-            category_id: 0,
-            title: cells[1]?.textContent || '',
-            unit_price: cells[2]?.textContent || '0',
-            origin_sort_price: '0',
-            sell_user_id: 0,
-            is_auto_deliver: 0,
-            remain_stock_num: 0,
-            off_url: '',
-            currency: 'USD',
-            current_currency: 'USD',
-            insurance: 0,
-            shop_name: '',
-          };
-        });
-      }
-
-      return [];
-    });
-
-    return offers;
-  } catch (err) {
-    console.error(`Puppeteer price scrape failed for ${url}:`, (err as Error).message);
-    return [];
-  } finally {
-    if (browser) {
-      try { await browser.close(); } catch {}
-    }
-  }
-}
-
 // ─── Rate limiter (per-platform) ──────────────────────────
 
 class RateLimiter {
@@ -270,40 +100,39 @@ const g2gLimiter = new RateLimiter();
 
 let catalogCache: { pairs: MatchedPair[]; ts: number } | null = null;
 
-// ─── Step 1 — Scrape Z2U catalog pages (via Puppeteer) ────
+// ─── Step 1 — Scrape Z2U catalog pages (HTML) ─────────────
 
 async function scrapeZ2UCatalog(): Promise<Z2UCatalogEntry[]> {
   const entries: Z2UCatalogEntry[] = [];
 
   for (const url of Z2U.CATALOG_URLS) {
-    console.log(`Scraping Z2U catalog: ${url} (via Puppeteer)`);
+    console.log(`Scraping Z2U catalog: ${url}`);
+    try {
+      const res = await axios.get(url, { headers: Z2U.HEADERS, timeout: 15000 });
+      const html: string = res.data;
 
-    const html = await scrapeZ2UPageWithPuppeteer(url);
-    if (!html) {
-      console.warn(`Failed to fetch ${url}, skipping`);
-      continue;
+      const pattern = /href="\/([^\/]+)\/([a-z]+)-(\d+)-(\d+)"/g;
+      let match: RegExpExecArray | null;
+      let count = 0;
+      while ((match = pattern.exec(html)) !== null) {
+        const [, gameSlug, category, cidStr, gameIdStr] = match;
+        const cid = parseInt(cidStr, 10);
+        const gameId = parseInt(gameIdStr, 10);
+        const gameName = gameSlug
+          .split('-')
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ');
+        entries.push({ gameName, gameSlug, category, cid, gameId });
+        count++;
+      }
+      console.log(`  → Found ${count} entries from ${url}`);
+    } catch (err) {
+      console.error(`Failed to scrape Z2U catalog at ${url}:`, (err as Error).message);
     }
 
-    const pattern = /href="\/([^\/]+)\/([a-z]+)-(\d+)-(\d+)"/g;
-    let match: RegExpExecArray | null;
-    let count = 0;
-    while ((match = pattern.exec(html)) !== null) {
-      const [, gameSlug, category, cidStr, gameIdStr] = match;
-      const cid = parseInt(cidStr, 10);
-      const gameId = parseInt(gameIdStr, 10);
-      const gameName = gameSlug
-        .split('-')
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(' ');
-      entries.push({ gameName, gameSlug, category, cid, gameId });
-      count++;
-    }
-    console.log(`  → Found ${count} entries from ${url}`);
-
-    await sleep(1000); // Be polite between catalog pages
+    await sleep(1000);
   }
 
-  // Deduplicate
   const seen = new Set<string>();
   return entries.filter((e) => {
     const key = `${e.gameSlug}|${e.category}|${e.gameId}`;
@@ -320,7 +149,6 @@ async function getG2GBrands(): Promise<G2GBrand[]> {
 
   for (const cat of Object.values(G2G.CATEGORIES)) {
     try {
-      // Fixed: max must be between 1 and 24
       const res = await axios.get(`${G2G.BASE}/offer/category/${cat.id}/popular_brand`, {
         params: { max: 24, country: 'US', include_localization: 0, v: 'v2' },
         headers: G2G.HEADERS,
@@ -352,7 +180,6 @@ function matchPairs(z2uEntries: Z2UCatalogEntry[], g2gBrands: G2GBrand[]): Match
     });
     if (!match) continue;
 
-    // Only match each G2G brand once to avoid duplicates
     matchedG2G.add(match.brandId);
 
     const catKey = entry.category as keyof typeof G2G.CATEGORIES;
@@ -382,12 +209,62 @@ async function fetchPrices(
   pair: MatchedPair,
 ): Promise<{ z2u: Z2UOffer[]; g2g: G2GOffer[] } | null> {
   try {
-    // Z2U — use Puppeteer to bypass Cloudflare
+    // Z2U — use the paginated listing endpoint (GET, base64-encoded JSON)
     await z2uLimiter.wait();
-    const z2uUrl = `${Z2U.BASE}/${pair.z2uSlug}/${pair.category}-${pair.z2uCid}-${pair.z2uGameId}`;
-    console.log(`  Z2U price page: ${z2uUrl}`);
-    const z2uOffers = await scrapeZ2UOffersWithPuppeteer(z2uUrl);
-    console.log(`  → Got ${z2uOffers.length} Z2U offers`);
+    const baseUrl = `${Z2U.BASE}/${pair.z2uSlug}`;
+    const z2uOffers: Z2UOffer[] = [];
+
+    // First page to get totalCount
+    const firstRes = await axios.get(baseUrl, {
+      params: { page: 1, totalCount: '' },
+      headers: Z2U.HEADERS,
+      timeout: 15000,
+    });
+
+    let parsed: any;
+    try {
+      parsed = decodeZ2U(firstRes.data);
+    } catch {
+      console.warn(`  → Z2U first page decode failed for ${pair.gameName}, trying raw JSON`);
+      parsed = firstRes.data;
+    }
+
+    const msg = parsed?.msg || {};
+    const totalCount = msg.total || 0;
+    const lastPage = msg.last_page || 1;
+
+    if (Array.isArray(parsed?.data)) {
+      z2uOffers.push(...parsed.data);
+    }
+    console.log(`  → Page 1: ${z2uOffers.length} offers, total=${totalCount}, pages=${lastPage}`);
+
+    // Fetch remaining pages (up to MAX_PRICE_PAGES)
+    const pagesToFetch = Math.min(lastPage, ARBITRAGE.MAX_PRICE_PAGES);
+    for (let p = 2; p <= pagesToFetch; p++) {
+      await z2uLimiter.wait();
+      try {
+        const res = await axios.get(baseUrl, {
+          params: { page: p, totalCount },
+          headers: Z2U.HEADERS,
+          timeout: 15000,
+        });
+        let pageParsed: any;
+        try {
+          pageParsed = decodeZ2U(res.data);
+        } catch {
+          pageParsed = res.data;
+        }
+        if (Array.isArray(pageParsed?.data)) {
+          z2uOffers.push(...pageParsed.data);
+        }
+        console.log(`  → Page ${p}: ${pageParsed?.data?.length || 0} more offers`);
+      } catch (err) {
+        console.warn(`  → Page ${p} failed:`, (err as Error).message);
+        break;
+      }
+    }
+
+    console.log(`  → Total Z2U offers: ${z2uOffers.length}`);
 
     // G2G
     await g2gLimiter.wait();
@@ -470,13 +347,12 @@ async function buildCatalog(): Promise<MatchedPair[]> {
     return catalogCache.pairs;
   }
 
-  console.log('Scraping Z2U catalog (via Puppeteer)...');
+  console.log('Scraping Z2U catalog...');
   const z2uEntries = await scrapeZ2UCatalog();
   console.log(`Found ${z2uEntries.length} Z2U entries`);
 
   if (z2uEntries.length === 0) {
-    console.warn('Z2U catalog returned 0 entries — this likely means Puppeteer failed to bypass Cloudflare.');
-    console.warn('Falling back to a hardcoded list of popular games for testing.');
+    console.error('Z2U catalog returned 0 entries. Likely Cloudflare blocking the HTML pages too.');
     return [];
   }
 
@@ -557,16 +433,8 @@ app.get('/api/health', (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Arbitrage API running on http://localhost:${PORT}`);
-  console.log(`   G2G max brand fix: 100 → 24`);
-  console.log(`   Z2U now uses Puppeteer to bypass Cloudflare`);
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-  await closeBrowser();
-  process.exit(0);
-});
-process.on('SIGTERM', async () => {
-  await closeBrowser();
-  process.exit(0);
-});
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));

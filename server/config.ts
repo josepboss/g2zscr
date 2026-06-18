@@ -32,16 +32,10 @@ export const Z2U = {
 };
 
 export const ARBITRAGE = {
-  DELAY_MS: 800,
+  DELAY_MS: 2000,
   FEE: 0.07,
   CONCURRENCY: 3,
   CACHE_TTL_MS: 6 * 60 * 60 * 1000, // 6 hours
-};
-
-export const PUPPETEER = {
-  HEADLESS: true,
-  SLOW_MO_MS: 50,
-  VIEWPORT: { width: 1920, height: 1080 },
-  USER_AGENT:
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+  // Z2U pagination: we fetch the first page to get totalCount, then fetch up to this many pages
+  MAX_PRICE_PAGES: 3,
 };
