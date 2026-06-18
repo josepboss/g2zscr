@@ -277,7 +277,7 @@ function computeArbitrage(
   const margin = buyPrice > 0 ? (netProfit / buyPrice) * 100 : 0;
 
   const z2uUrl = `${Z2U.BASE}/${pair.z2uSlug}/${pair.category}-${pair.z2uCid}-${pair.z2uGameId}`;
-  const g2gUrl = `https://www.g2g.com/offer/search?seo_term=${pair.g2gSeoTerm}`;
+  const g2gUrl = `https://www.g2g.com/offers/${pair.g2gSeoTerm}`;
 
   return {
     gameName: pair.gameName,
