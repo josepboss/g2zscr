@@ -49,6 +49,38 @@ const generateSeoTerm = (brandName: string, category: string): string => {
   return `${base}-${suffix}`;
 };
 
+// ─── Bug 5 — Fuzzy matching with abbreviation map & token overlap ───
+
+const ABBREVS: Record<string, string> = {
+  osrs: 'oldschoolrunescape',
+  wow: 'worldofwarcraft',
+  lol: 'leagueoflegends',
+  fn: 'fortnite',
+  cod: 'callofduty',
+  gta: 'grandtheftauto',
+  rs: 'runescape',
+  eso: 'elderscrollsonline',
+  rl: 'rocketleague',
+  fc: 'easportsfc',
+};
+
+function fuzzyMatch(a: string, b: string): boolean {
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // Expand abbreviations
+  const ea = ABBREVS[na] || na;
+  const eb = ABBREVS[nb] || nb;
+  if (ea === eb || ea.includes(eb) || eb.includes(ea)) return true;
+  // Token overlap — accept if 60%+ tokens match
+  const ta = new Set(na.match(/.{3,}/g) || []);
+  const tb = new Set(nb.match(/.{3,}/g) || []);
+  const overlap = [...ta].filter(t => tb.has(t)).length;
+  const score = overlap / Math.max(ta.size, tb.size, 1);
+  return score >= 0.6;
+}
+
 // ─── Rate limiter (per-platform) ──────────────────────────
 
 class RateLimiter {
@@ -74,9 +106,11 @@ let catalogCache: { pairs: MatchedPair[]; ts: number } | null = null;
 
 async function scrapeZ2UCatalog(): Promise<Z2UCatalogEntry[]> {
   const entries: Z2UCatalogEntry[] = [];
-  const pattern = /href="\/([^\/]+)\/([a-z]+)-(\d+)-(\d+)"/g;
 
   for (const url of Z2U.CATALOG_URLS) {
+    // Bug 3 — Pattern must be recreated per page to reset lastIndex
+    const pattern = /href="\/([^\/]+)\/([a-z]+)-(\d+)-(\d+)"/g;
+
     try {
       const res = await axios.get(url, { headers: Z2U.HEADERS, timeout: 15000 });
       const html: string = res.data;
@@ -136,19 +170,15 @@ async function getG2GBrands(): Promise<G2GBrand[]> {
 
 function matchPairs(z2uEntries: Z2UCatalogEntry[], g2gBrands: G2GBrand[]): MatchedPair[] {
   const pairs: MatchedPair[] = [];
-  const g2gNorm = g2gBrands.map((b) => ({ ...b, norm: normalize(b.brandName) }));
 
   for (const entry of z2uEntries) {
-    const entryNorm = normalize(entry.gameName);
-
-    const match = g2gNorm.find(
-      (b) => b.norm.includes(entryNorm) || entryNorm.includes(b.norm),
-    );
+    // Bug 5 — Use fuzzyMatch with abbreviation map + token overlap
+    const match = g2gBrands.find((b) => fuzzyMatch(entry.gameName, b.brandName));
     if (!match) continue;
 
-    // Try to find category config; fall back to accounts
-    const catKey = entry.category === 'accounts' ? 'accounts' : 'accounts';
-    const catConfig = G2G.CATEGORIES[catKey as keyof typeof G2G.CATEGORIES];
+    // Bug 2 — Use the actual category key instead of hardcoding 'accounts'
+    const catKey = entry.category as keyof typeof G2G.CATEGORIES;
+    const catConfig = G2G.CATEGORIES[catKey];
     if (!catConfig) continue;
 
     pairs.push({
@@ -178,7 +208,8 @@ async function fetchPrices(
     await z2uLimiter.wait();
     const z2uUrl = `${Z2U.BASE}/${pair.z2uSlug}/${pair.category}-${pair.z2uCid}-${pair.z2uGameId}`;
     const z2uRes = await axios.get(z2uUrl, {
-      params: { page: 1, totalCount: pair.z2uGameId },
+      // Bug 1 — totalCount should be a reasonable page size, not gameId
+      params: { page: 1, totalCount: 50 },
       headers: Z2U.HEADERS,
       timeout: 15000,
     });
@@ -246,7 +277,7 @@ function computeArbitrage(
   const margin = buyPrice > 0 ? (netProfit / buyPrice) * 100 : 0;
 
   const z2uUrl = `${Z2U.BASE}/${pair.z2uSlug}/${pair.category}-${pair.z2uCid}-${pair.z2uGameId}`;
-  const g2gUrl = `${G2G.BASE}/offer/search?seo_term=${pair.g2gSeoTerm}`;
+  const g2gUrl = `https://www.g2g.com/offer/search?seo_term=${pair.g2gSeoTerm}`;
 
   return {
     gameName: pair.gameName,
