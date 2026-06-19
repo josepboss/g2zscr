@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { G2G, Z2U, ARBITRAGE } from './config';
 import { HARDCODED_PAIRS } from './hardcodedGames';
 import type {
@@ -19,6 +20,10 @@ const PORT = 3001;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ─── SOCKS5 proxy agent ────────────────────────────────────
+
+const socksAgent = new SocksProxyAgent('socks5://127.0.0.1:40000');
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -156,6 +161,8 @@ async function fetchPrices(
       params: { page: 1, totalCount: '' },
       headers: Z2U.HEADERS,
       timeout: 15000,
+      httpAgent: socksAgent,
+      httpsAgent: socksAgent,
     });
 
     let parsed: any;
@@ -184,6 +191,8 @@ async function fetchPrices(
           params: { page: p, totalCount },
           headers: Z2U.HEADERS,
           timeout: 15000,
+          httpAgent: socksAgent,
+          httpsAgent: socksAgent,
         });
         let pageParsed: any;
         try {
@@ -217,6 +226,8 @@ async function fetchPrices(
       },
       headers: G2G.HEADERS,
       timeout: 15000,
+      httpAgent: socksAgent,
+      httpsAgent: socksAgent,
     });
     const g2gOffers: G2GOffer[] = g2gRes.data?.payload?.results || [];
     console.log(`  → Got ${g2gOffers.length} G2G offers`);
