@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import { G2G, Z2U, ARBITRAGE } from './config';
+import { HARDCODED_PAIRS } from './hardcodedGames';
 import type {
   Z2UCatalogEntry,
   G2GBrand,
@@ -49,36 +50,6 @@ const generateSeoTerm = (brandName: string, category: string): string => {
   return `${base}-${suffix}`;
 };
 
-// ─── Fuzzy matching with abbreviation map & token overlap ───
-
-const ABBREVS: Record<string, string> = {
-  osrs: 'oldschoolrunescape',
-  wow: 'worldofwarcraft',
-  lol: 'leagueoflegends',
-  fn: 'fortnite',
-  cod: 'callofduty',
-  gta: 'grandtheftauto',
-  rs: 'runescape',
-  eso: 'elderscrollsonline',
-  rl: 'rocketleague',
-  fc: 'easportsfc',
-};
-
-function fuzzyMatch(a: string, b: string): boolean {
-  const na = normalize(a);
-  const nb = normalize(b);
-  if (na === nb) return true;
-  if (na.includes(nb) || nb.includes(na)) return true;
-  const ea = ABBREVS[na] || na;
-  const eb = ABBREVS[nb] || nb;
-  if (ea === eb || ea.includes(eb) || eb.includes(ea)) return true;
-  const ta = new Set(na.match(/.{3,}/g) || []);
-  const tb = new Set(nb.match(/.{3,}/g) || []);
-  const overlap = [...ta].filter(t => tb.has(t)).length;
-  const score = overlap / Math.max(ta.size, tb.size, 1);
-  return score >= 0.6;
-}
-
 // ─── Rate limiter (per-platform) ──────────────────────────
 
 class RateLimiter {
@@ -100,49 +71,51 @@ const g2gLimiter = new RateLimiter();
 
 let catalogCache: { pairs: MatchedPair[]; ts: number } | null = null;
 
-// ─── Step 1 — Scrape Z2U catalog pages (HTML) ─────────────
+// ─── Step 1 — Build catalog from hardcoded games ──────────
 
-async function scrapeZ2UCatalog(): Promise<Z2UCatalogEntry[]> {
-  const entries: Z2UCatalogEntry[] = [];
+async function buildCatalogFromHardcoded(): Promise<MatchedPair[]> {
+  const pairs: MatchedPair[] = [];
 
-  for (const url of Z2U.CATALOG_URLS) {
-    console.log(`Scraping Z2U catalog: ${url}`);
-    try {
-      const res = await axios.get(url, { headers: Z2U.HEADERS, timeout: 15000 });
-      const html: string = res.data;
+  // Fetch G2G brands once
+  const g2gBrands = await getG2GBrands();
+  console.log(`Fetched ${g2gBrands.length} G2G brands`);
 
-      const pattern = /href="\/([^\/]+)\/([a-z]+)-(\d+)-(\d+)"/g;
-      let match: RegExpExecArray | null;
-      let count = 0;
-      while ((match = pattern.exec(html)) !== null) {
-        const [, gameSlug, category, cidStr, gameIdStr] = match;
-        const cid = parseInt(cidStr, 10);
-        const gameId = parseInt(gameIdStr, 10);
-        const gameName = gameSlug
-          .split('-')
-          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-          .join(' ');
-        entries.push({ gameName, gameSlug, category, cid, gameId });
-        count++;
-      }
-      console.log(`  → Found ${count} entries from ${url}`);
-    } catch (err) {
-      console.error(`Failed to scrape Z2U catalog at ${url}:`, (err as Error).message);
+  for (const entry of HARDCODED_PAIRS) {
+    // Fuzzy match by name
+    const match = g2gBrands.find(
+      (b) =>
+        normalize(b.brandName).includes(normalize(entry.gameName)) ||
+        normalize(entry.gameName).includes(normalize(b.brandName)),
+    );
+
+    if (!match) {
+      console.warn(`No G2G match for ${entry.gameName}`);
+      continue;
     }
 
-    await sleep(1000);
+    const catConfig = G2G.CATEGORIES[entry.category as keyof typeof G2G.CATEGORIES];
+    if (!catConfig) continue;
+
+    const slug = entry.z2uSlug.split('/')[0]; // game slug only
+
+    pairs.push({
+      gameName: entry.gameName,
+      category: entry.category,
+      z2uSlug: slug,
+      z2uGameId: entry.z2uGameId,
+      z2uCid: entry.z2uCid,
+      g2gBrandId: match.brandId,
+      g2gBrandName: match.brandName,
+      g2gSeoTerm: generateSeoTerm(match.brandName, entry.category),
+      g2gCategoryId: catConfig.id,
+      g2gServiceId: catConfig.serviceId,
+    });
   }
 
-  const seen = new Set<string>();
-  return entries.filter((e) => {
-    const key = `${e.gameSlug}|${e.category}|${e.gameId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return pairs;
 }
 
-// ─── Step 2 — Get G2G popular brands ──────────────────────
+// ─── Step 2 (old) — Get G2G popular brands ────────────────
 
 async function getG2GBrands(): Promise<G2GBrand[]> {
   const brands: G2GBrand[] = [];
@@ -167,43 +140,7 @@ async function getG2GBrands(): Promise<G2GBrand[]> {
   return brands;
 }
 
-// ─── Step 3 — Fuzzy-match Z2U entries ↔ G2G brands ────────
-
-function matchPairs(z2uEntries: Z2UCatalogEntry[], g2gBrands: G2GBrand[]): MatchedPair[] {
-  const pairs: MatchedPair[] = [];
-  const matchedG2G = new Set<string>();
-
-  for (const entry of z2uEntries) {
-    const match = g2gBrands.find((b) => {
-      if (matchedG2G.has(b.brandId)) return false;
-      return fuzzyMatch(entry.gameName, b.brandName);
-    });
-    if (!match) continue;
-
-    matchedG2G.add(match.brandId);
-
-    const catKey = entry.category as keyof typeof G2G.CATEGORIES;
-    const catConfig = G2G.CATEGORIES[catKey];
-    if (!catConfig) continue;
-
-    pairs.push({
-      gameName: entry.gameName,
-      category: entry.category,
-      z2uSlug: entry.gameSlug,
-      z2uGameId: entry.gameId,
-      z2uCid: entry.cid,
-      g2gBrandId: match.brandId,
-      g2gBrandName: match.brandName,
-      g2gSeoTerm: generateSeoTerm(match.brandName, entry.category),
-      g2gCategoryId: catConfig.id,
-      g2gServiceId: catConfig.serviceId,
-    });
-  }
-
-  return pairs;
-}
-
-// ─── Step 4 — Fetch prices for one matched pair ───────────
+// ─── Step 3 — Fetch prices for one matched pair ───────────
 
 async function fetchPrices(
   pair: MatchedPair,
@@ -291,7 +228,7 @@ async function fetchPrices(
   }
 }
 
-// ─── Step 5 — Compute arbitrage from offers ────────────────
+// ─── Step 4 — Compute arbitrage from offers ────────────────
 
 function computeArbitrage(
   pair: MatchedPair,
@@ -347,22 +284,9 @@ async function buildCatalog(): Promise<MatchedPair[]> {
     return catalogCache.pairs;
   }
 
-  console.log('Scraping Z2U catalog...');
-  const z2uEntries = await scrapeZ2UCatalog();
-  console.log(`Found ${z2uEntries.length} Z2U entries`);
-
-  if (z2uEntries.length === 0) {
-    console.error('Z2U catalog returned 0 entries. Likely Cloudflare blocking the HTML pages too.');
-    return [];
-  }
-
-  console.log('Fetching G2G brands...');
-  const g2gBrands = await getG2GBrands();
-  console.log(`Found ${g2gBrands.length} G2G brands`);
-
-  console.log('Matching pairs...');
-  const pairs = matchPairs(z2uEntries, g2gBrands);
-  console.log(`Matched ${pairs.length} pairs`);
+  console.log('Building catalog from hardcoded games...');
+  const pairs = await buildCatalogFromHardcoded();
+  console.log(`Built ${pairs.length} pairs`);
 
   catalogCache = { pairs, ts: Date.now() };
   return pairs;
